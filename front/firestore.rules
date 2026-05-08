@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      let requiredKeys = ['uid', 'displayName', 'email', 'attributes', 'xp', 'level', 'createdAt', 'updatedAt'];
+      return data.keys().hasAll(requiredKeys)
+        && data.keys().size() >= 8 && data.keys().size() <= 10
+        && data.uid == request.auth.uid
+        && data.displayName is string && data.displayName.size() <= 100
+        && data.email is string && data.email.size() <= 100
+        && (!('goals' in data) || data.goals is string)
+        && (!('avatarUrl' in data) || data.avatarUrl is string)
+        && data.attributes is map
+        && data.attributes.keys().hasAll(['strength', 'intelligence', 'creativity', 'stamina'])
+        && data.attributes.keys().size() == 4
+        && data.attributes.strength is int
+        && data.attributes.intelligence is int
+        && data.attributes.creativity is int
+        && data.attributes.stamina is int
+        && data.xp is int
+        && data.level is int
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isValidQuest(data) {
+      return data.keys().hasAll(['userId', 'title', 'description', 'difficulty', 'attribute', 'xpReward', 'type', 'status', 'date', 'createdAt', 'updatedAt'])
+        && data.keys().size() == 11
+        && data.userId == request.auth.uid
+        && data.title is string && data.title.size() <= 200
+        && data.description is string && data.description.size() <= 2000
+        && data.difficulty in ['easy', 'medium', 'hard']
+        && data.attribute in ['strength', 'intelligence', 'creativity', 'stamina']
+        && data.xpReward is int
+        && data.type in ['daily', 'special']
+        && data.status in ['pending', 'completed', 'failed']
+        && data.date is string && data.date.size() <= 20
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    // --- Collection Matches ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action: Update Progress
+          (incoming().diff(existing()).affectedKeys().hasOnly(['attributes', 'xp', 'level', 'updatedAt', 'displayName', 'avatarUrl', 'goals']))
+          && incoming().updatedAt == request.time
+        );
+    }
+
+    match /quests/{questId} {
+      allow get: if isOwner(existing().userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidQuest(incoming());
+      allow update: if isOwner(existing().userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action: Complete/Fail Quest
+          (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          && incoming().updatedAt == request.time
+        );
+      allow delete: if isOwner(existing().userId);
+    }
+  }
+}
